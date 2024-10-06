@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
@@ -21,22 +20,7 @@ enum HeadType {
 }
 
 /// Represents a literal, which can be positive or negative.
-#[derive(Debug, Clone, Copy)]
-struct Literal(isize);
-
-impl Literal {
-    fn new(value: isize) -> Self {
-        Self(value)
-    }
-
-    fn negate(self) -> Self {
-        Self(-self.0)
-    }
-
-    fn value(self) -> isize {
-        self.0
-    }
-}
+type Literal = isize;
 
 /// Represents the body of a rule, which can be normal or a weight body.
 #[derive(Debug)]
@@ -64,22 +48,45 @@ impl AtomTable {
         }
     }
 
+    /// Maps atom name to variable number.
     fn add_atom(&mut self, name: &str, var: usize) {
         self.atom_to_var.insert(name.to_string(), var);
         self.var_to_atom.insert(var, name.to_string());
         self.atoms.insert(var);
     }
 
+    /// Adds a literal's absolute value as an atom.
     fn add_literal(&mut self, lit: isize) {
         self.atoms.insert(lit.abs() as usize);
     }
 
+    /// Retrieves the maximum variable number used in atoms.
     fn max_atom_var(&self) -> usize {
         *self.atoms.iter().max().unwrap_or(&0)
     }
 
+    /// Returns a reference to all atoms.
     fn atoms(&self) -> &HashSet<usize> {
         &self.atoms
+    }
+}
+
+/// Variable counter for generating new variables.
+struct VarCounter(usize);
+
+impl VarCounter {
+    fn new(start: usize) -> Self {
+        VarCounter(start)
+    }
+
+    fn get_new_variable(&mut self) -> usize {
+        let var = self.0;
+        self.0 += 1;
+        var
+    }
+
+    fn current(&self) -> usize {
+        self.0 - 1
     }
 }
 
@@ -88,7 +95,7 @@ struct ASPProgram {
     rules: Vec<Rule>,
     atom_table: AtomTable,
     atom_rule_vars: HashMap<usize, Vec<usize>>,
-    next_variable: Cell<usize>,
+    var_counter: VarCounter,
 }
 
 impl ASPProgram {
@@ -97,7 +104,7 @@ impl ASPProgram {
             rules: Vec::new(),
             atom_table: AtomTable::new(),
             atom_rule_vars: HashMap::new(),
-            next_variable: Cell::new(1), // Initialize with 1 or the appropriate starting value
+            var_counter: VarCounter::new(1), // Initialize with 1 or the appropriate starting value
         }
     }
 
@@ -154,7 +161,7 @@ impl ASPProgram {
                 for _ in 0..n {
                     let lit = tokens[idx].parse::<isize>().unwrap();
                     self.atom_table.add_literal(lit);
-                    body_literals.push(Literal::new(lit));
+                    body_literals.push(lit);
                     idx += 1;
                 }
                 Body::Normal(body_literals)
@@ -172,7 +179,7 @@ impl ASPProgram {
                     let weight = tokens[idx].parse::<usize>().unwrap();
                     idx += 1;
                     self.atom_table.add_literal(lit);
-                    literals.push((Literal::new(lit), weight));
+                    literals.push((lit, weight));
                 }
                 Body::Weight {
                     lower_bound,
@@ -195,7 +202,7 @@ impl ASPProgram {
 
     /// Parses an output statement to map atom names to variable numbers.
     fn parse_output(&mut self, tokens: &[&str]) {
-        let m = tokens[0].parse::<usize>().unwrap();
+        let _m = tokens[0].parse::<usize>().unwrap();
         let s = tokens[1];
         let n = tokens[2].parse::<usize>().unwrap();
 
@@ -229,29 +236,21 @@ impl ASPProgram {
 
     /// Assigns unique rule variables to rules with non-empty heads and updates mappings.
     fn assign_rule_vars(&mut self) {
-        let mut rule_var_counter = self.atom_table.max_atom_var();
+        let max_atom_var = self.atom_table.max_atom_var();
+        self.var_counter = VarCounter::new(max_atom_var + 1);
         for rule in &mut self.rules {
             if !rule.head_atoms.is_empty() {
-                rule_var_counter += 1;
-                rule.rule_var = Some(rule_var_counter);
+                let rule_var = self.var_counter.get_new_variable();
+                rule.rule_var = Some(rule_var);
                 // Map head atoms to rule variables
                 for &atom in &rule.head_atoms {
                     self.atom_rule_vars
                         .entry(atom)
                         .or_insert_with(Vec::new)
-                        .push(rule_var_counter);
+                        .push(rule_var);
                 }
             }
         }
-        // Update `next_variable` to be one more than the current `rule_var_counter`
-        self.next_variable.set(rule_var_counter + 1);
-    }
-
-    /// Retrieves a new unique variable number.
-    fn get_new_variable(&self) -> usize {
-        let var = self.next_variable.get();
-        self.next_variable.set(var + 1);
-        var
     }
 
     /// Generates CNF clauses based on the parsed rules.
@@ -261,134 +260,75 @@ impl ASPProgram {
         for rule in &self.rules {
             match &rule.body {
                 Body::Normal(body_literals) => {
-                    // Handle normal rules as before
-                    if rule.head_type == HeadType::Disjunction && !rule.head_atoms.is_empty() {
-                        // Basic rule
-                        let mut clause: Vec<isize> =
-                            rule.head_atoms.iter().map(|&a| a as isize).collect();
-                        for &lit in body_literals {
-                            clause.push(-lit.value());
-                        }
-                        clauses.push(clause);
-                    }
-                    // Constraints (rules with empty head)
-                    if rule.head_type == HeadType::Disjunction && rule.head_atoms.is_empty() {
-                        let clause: Vec<isize> =
-                            body_literals.iter().map(|&lit| -lit.value()).collect();
-                        clauses.push(clause);
-                    }
-                    // Supportedness constraints
-                    if let Some(r_var) = rule.rule_var {
-                        for &lit in body_literals {
-                            clauses.push(vec![-(r_var as isize), lit.value()]);
-                        }
-                    }
+                    self.generate_normal_rule_clauses(rule, body_literals, &mut clauses);
                 }
                 Body::Weight {
                     lower_bound,
                     literals,
                 } => {
-                    // Handle weight bodies
-                    if *lower_bound != 2 {
-                        panic!("Only weight bodies with lower bound 2 are supported.");
-                    }
-                    if !literals.iter().all(|&(_, w)| w == 1) {
-                        panic!("Only weight bodies with all weights 1 are supported.");
-                    }
-                    let n = literals.len();
-                    let k = (n as f64).log2().ceil() as usize;
-                    // Create k new variables v0, v1, ..., v(k-1)
-                    let mut v_vars = Vec::new();
-                    for _ in 0..k {
-                        let var = self.get_new_variable();
-                        v_vars.push(var);
-                    }
-                    // Assign bitstrings to literals
-                    let mut bitstrings: HashMap<isize, Vec<bool>> = HashMap::new();
-                    for (i, (lit, _)) in literals.iter().enumerate() {
-                        let bitstring = format!("{:0width$b}", i, width = k);
-                        let bits: Vec<bool> = bitstring.chars().map(|c| c == '1').collect();
-                        bitstrings.insert(lit.value(), bits);
-                    }
-                    // For each body literal l, create an extra variable l'
-                    let mut l_prime_vars: HashMap<isize, usize> = HashMap::new();
-                    for (lit, _) in literals {
-                        let l_prime = self.get_new_variable();
-                        l_prime_vars.insert(lit.value(), l_prime);
-                    }
-                    // Generate clauses as per the user's instructions
-                    // For each body literal l
-                    for (lit, _) in literals {
-                        let l_val = lit.value();
-                        let bits = &bitstrings[&l_val];
-                        // For each bit position i
-                        for (i, &bit) in bits.iter().enumerate() {
-                            let v_i = v_vars[i];
-                            // Start clause with head atoms
-                            let mut clause = Vec::new();
-                            for &a in &rule.head_atoms {
-                                clause.push(a as isize);
-                            }
-                            clause.push(-l_val);
-                            if bit {
-                                clause.push(v_i as isize);
-                            } else {
-                                clause.push(-(v_i as isize));
-                            }
-                            clauses.push(clause);
-                        }
-                        // For supportedness constraints:
-                        // Create clauses for l'
-                        let l_prime = l_prime_vars[&l_val];
-                        clauses.push(vec![-(l_prime as isize), l_val]);
-                        // not l' \/ (vs don't match l's bitstring)
-                        let mut vs_clause = vec![-(l_prime as isize)];
-                        let bits = &bitstrings[&l_val];
-                        for (i, &bit) in bits.iter().enumerate() {
-                            let v_i = v_vars[i];
-                            if bit {
-                                vs_clause.push(-(v_i as isize));
-                            } else {
-                                vs_clause.push(v_i as isize);
-                            }
-                        }
-                        clauses.push(vs_clause);
-                    }
-                    // For the rule variable r_i
-                    if let Some(r_var) = rule.rule_var {
-                        // For each bit variable v_i
-                        for (i, &v_i) in v_vars.iter().enumerate() {
-                            let mut clause1 = vec![-(r_var as isize), v_i as isize];
-                            let mut clause2 = vec![-(r_var as isize), -(v_i as isize)];
-                            // Collect body literals where bit i is 0 or 1
-                            let mut literals_with_bit0 = Vec::new();
-                            let mut literals_with_bit1 = Vec::new();
-                            for (lit, _) in literals {
-                                let l_val = lit.value();
-                                let bits = &bitstrings[&l_val];
-                                if bits[i] {
-                                    literals_with_bit1.push(l_val);
-                                } else {
-                                    literals_with_bit0.push(l_val);
-                                }
-                            }
-                            clause1.extend(literals_with_bit0);
-                            clause2.extend(literals_with_bit1);
-                            clauses.push(clause1);
-                            clauses.push(clause2);
-                        }
-                        // Add clause: not r_i \/ (l' for all body literals)
-                        let mut l_primes_clause = vec![-(r_var as isize)];
-                        for &l_prime in l_prime_vars.values() {
-                            l_primes_clause.push(l_prime as isize);
-                        }
-                        clauses.push(l_primes_clause);
+                    // Calculate the total sum of weights
+                    let total_weight: isize = literals.iter().map(|(_, w)| *w as isize).sum();
+
+                    // Special handling when lower_bound == total_weight
+                    if *lower_bound == total_weight {
+                        // Treat as normal body
+                        let body_literals: Vec<Literal> =
+                            literals.iter().map(|(lit, _)| *lit).collect();
+                        self.generate_normal_rule_clauses(rule, &body_literals, &mut clauses);
+                    } else {
+                        // Use the existing approach
+                        let mut builder = WeightBodyBuilder::new(
+                            rule,
+                            *lower_bound,
+                            literals,
+                            &mut self.var_counter,
+                            &mut clauses,
+                        );
+                        builder.generate_clauses();
                     }
                 }
             }
         }
 
-        // For each atom, add clause ¬a ∨ r1 ∨ r2 ∨ ...
+        // Add the atom support clauses
+        self.generate_atom_support_clauses(&mut clauses);
+
+        clauses
+    }
+
+    /// Generates clauses for normal rules and constraints.
+    fn generate_normal_rule_clauses(
+        &self,
+        rule: &Rule,
+        body_literals: &[Literal],
+        clauses: &mut Vec<Vec<isize>>,
+    ) {
+        if rule.head_type == HeadType::Disjunction && !rule.head_atoms.is_empty() {
+            // Basic rule: a :- b, not c, d
+            // Encoded as: a \/ not b \/ c \/ not d
+            let mut clause: Vec<isize> = rule.head_atoms.iter().map(|&a| a as isize).collect();
+            for &lit in body_literals {
+                clause.push(-lit);
+            }
+            clauses.push(clause);
+        }
+        // Constraints (rules with empty head)
+        if rule.head_type == HeadType::Disjunction && rule.head_atoms.is_empty() {
+            // Constraint: :- b, not c.
+            // Encoded as: not b \/ c
+            let clause: Vec<isize> = body_literals.iter().map(|&lit| -lit).collect();
+            clauses.push(clause);
+        }
+        // Supportedness constraints
+        if let Some(r_var) = rule.rule_var {
+            for &lit in body_literals {
+                clauses.push(vec![-(r_var as isize), lit]);
+            }
+        }
+    }
+
+    /// Generates the atom support clauses.
+    fn generate_atom_support_clauses(&self, clauses: &mut Vec<Vec<isize>>) {
         for &atom_var in self.atom_table.atoms() {
             if let Some(rule_vars) = self.atom_rule_vars.get(&atom_var) {
                 let mut clause = vec![-(atom_var as isize)];
@@ -398,16 +338,148 @@ impl ASPProgram {
                 clauses.push(clause);
             }
         }
-
-        // Update the next_variable to the maximum variable used
-        self.next_variable.set(self.total_variables() + 1);
-
-        clauses
     }
 
     /// Retrieves the total number of variables used.
     fn total_variables(&self) -> usize {
-        self.next_variable.get() - 1
+        self.var_counter.current()
+    }
+}
+
+/// Struct to handle weight body clause generation.
+struct WeightBodyBuilder<'a> {
+    rule: &'a Rule,
+    literals: &'a [(Literal, usize)],
+    clauses: &'a mut Vec<Vec<isize>>,
+    v_vars: Vec<usize>,
+    bitstrings: HashMap<isize, Vec<bool>>,
+    l_prime_vars: HashMap<isize, usize>,
+}
+
+impl<'a> WeightBodyBuilder<'a> {
+    fn new(
+        rule: &'a Rule,
+        lower_bound: isize,
+        literals: &'a [(Literal, usize)],
+        var_counter: &'a mut VarCounter,
+        clauses: &'a mut Vec<Vec<isize>>,
+    ) -> Self {
+        // Check conditions
+        if lower_bound != 2 {
+            panic!("Only weight bodies with lower bound 2 are supported. Got rule {:?}", rule);
+        }
+        if !literals.iter().all(|&(_, w)| w == 1) {
+            panic!("Only weight bodies with all weights 1 are supported. Got rule {:?}", rule);
+        }
+        let n = literals.len();
+        let k = (n as f64).log2().ceil() as usize;
+
+        // Create k new variables v0, v1, ..., v(k-1)
+        let mut v_vars = Vec::new();
+        for _ in 0..k {
+            let var = var_counter.get_new_variable();
+            v_vars.push(var);
+        }
+
+        // Assign bitstrings to literals
+        let mut bitstrings: HashMap<isize, Vec<bool>> = HashMap::new();
+        for (i, &(lit, _)) in literals.iter().enumerate() {
+            let bitstring = format!("{:0width$b}", i, width = k);
+            let bits: Vec<bool> = bitstring.chars().map(|c| c == '1').collect();
+            bitstrings.insert(lit, bits);
+        }
+
+        // For each body literal l, create an extra variable l'
+        let mut l_prime_vars: HashMap<isize, usize> = HashMap::new();
+        for &(lit, _) in literals {
+            let l_prime = var_counter.get_new_variable();
+            l_prime_vars.insert(lit, l_prime);
+        }
+
+        WeightBodyBuilder {
+            rule,
+            literals,
+            clauses,
+            v_vars,
+            bitstrings,
+            l_prime_vars,
+        }
+    }
+
+    fn generate_clauses(&mut self) {
+        // Generate clauses for each body literal
+        for (lit, _) in self.literals.iter() {
+            self.generate_body_literal_clauses(*lit);
+        }
+        // Generate supportedness clauses
+        if let Some(r_var) = self.rule.rule_var {
+            self.generate_supportedness_clauses(r_var);
+        }
+    }
+
+    fn generate_body_literal_clauses(&mut self, lit: Literal) {
+        let bits = &self.bitstrings[&lit];
+        // For each bit position i
+        for (i, &bit) in bits.iter().enumerate() {
+            let v_i = self.v_vars[i];
+            // Clause: a \/ not l \/ v_i or a \/ not l \/ v_i
+            let mut clause = Vec::new();
+            for &a in &self.rule.head_atoms {
+                clause.push(a as isize);
+            }
+            clause.push(-lit);
+            if bit {
+                clause.push(v_i as isize);
+            } else {
+                clause.push(-(v_i as isize));
+            }
+            self.clauses.push(clause);
+        }
+        // Supportedness constraints:
+        // Clause: not l' \/ l
+        let l_prime = self.l_prime_vars[&lit];
+        self.clauses.push(vec![-(l_prime as isize), lit]);
+        // Clause: not l' \/ (vs don't match l's bitstring)
+        let mut vs_clause = vec![-(l_prime as isize)];
+        let bits = &self.bitstrings[&lit];
+        for (i, &bit) in bits.iter().enumerate() {
+            let v_i = self.v_vars[i];
+            if bit {
+                vs_clause.push(-(v_i as isize));
+            } else {
+                vs_clause.push(v_i as isize);
+            }
+        }
+        self.clauses.push(vs_clause);
+    }
+
+    fn generate_supportedness_clauses(&mut self, r_var: usize) {
+        // For each bit variable v_i
+        for (i, &v_i) in self.v_vars.iter().enumerate() {
+            let mut clause1 = vec![-(r_var as isize), v_i as isize];
+            let mut clause2 = vec![-(r_var as isize), -(v_i as isize)];
+            // Collect literals where bit i is 0 or 1
+            let mut literals_with_bit0 = Vec::new();
+            let mut literals_with_bit1 = Vec::new();
+            for (lit, _) in self.literals {
+                let bits = &self.bitstrings[&lit];
+                if bits[i] {
+                    literals_with_bit1.push(lit);
+                } else {
+                    literals_with_bit0.push(lit);
+                }
+            }
+            clause1.extend(literals_with_bit0);
+            clause2.extend(literals_with_bit1);
+            self.clauses.push(clause1);
+            self.clauses.push(clause2);
+        }
+        // Add clause: not r_i \/ (l' for all body literals)
+        let mut l_primes_clause = vec![-(r_var as isize)];
+        for &l_prime in self.l_prime_vars.values() {
+            l_primes_clause.push(l_prime as isize);
+        }
+        self.clauses.push(l_primes_clause);
     }
 }
 
