@@ -12,7 +12,7 @@ struct Rule {
 }
 
 /// Represents the type of the rule head.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum HeadType {
     Disjunction,
     Choice,
@@ -244,55 +244,68 @@ impl SatTranslator {
     fn generate_clauses(&mut self, prog: &ASPProgram) {
         for rule in &prog.rules {
             let rule_var = self.var_counter.get_new_variable();
-            if rule.head_type == HeadType::Disjunction {
-                self.clauses.push(
-                    rule.head_atoms
-                        .iter()
-                        .map(|&a| a as isize)
-                        .chain(iter::once(-(rule_var as isize)))
-                        .collect(),
-                );
-            }
-            for &head_atom in &rule.head_atoms {
-                self.atom_rule_vars
-                    .entry(head_atom)
-                    .or_insert_with(Vec::new)
-                    .push(rule_var);
-            }
-
-            let Body {
-                lower_bound,
-                literals,
-            } = &rule.body;
-            // Calculate the total sum of weights
-            let total_weight = literals.iter().map(|(_, w)| *w).sum();
-
-            // Special handling when lower_bound == total_weight
-            if *lower_bound == total_weight {
-                // Treat as normal body
-                self.generate_normal_rule_clauses(&rule.body, rule_var);
-            } else {
-                // Use the existing approach
-                WeightBodyBuilder::new(&rule.body, rule_var, self).generate_clauses();
-            }
+            self.generate_head_clauses(rule.head_type, &rule.head_atoms, rule_var);
+            self.generate_body_clauses(&rule.body, rule_var);
         }
 
         // Add the atom support clauses
         self.generate_atom_support_clauses();
     }
 
-    /// Generates clauses for normal rules and constraints.
-    fn generate_normal_rule_clauses(&mut self, body: &Body, rule_var: usize) {
-        // Basic rule: a :- b, not c, d
-        // Encoded as: a \/ not b \/ c \/ not d
-        let mut body_clause = vec![rule_var as isize];
-        for &(lit, _) in &body.literals {
-            body_clause.push(-lit);
+    fn generate_head_clauses(
+        &mut self,
+        head_type: HeadType,
+        head_atoms: &Vec<usize>,
+        rule_var: usize,
+    ) {
+        if head_type == HeadType::Disjunction {
+            self.clauses.push(
+                head_atoms
+                    .iter()
+                    .map(|&a| a as isize)
+                    .chain(iter::once(-(rule_var as isize)))
+                    .collect(),
+            );
         }
-        self.clauses.push(body_clause);
-        // Supportedness constraints
-        for &(lit, _) in &body.literals {
-            self.clauses.push(vec![-(rule_var as isize), lit]);
+        for &head_atom in head_atoms {
+            self.atom_rule_vars
+                .entry(head_atom)
+                .or_insert_with(Vec::new)
+                .push(rule_var);
+        }
+    }
+
+    fn generate_body_clauses(&mut self, body: &Body, rule_var: usize) {
+        let Body {
+            lower_bound,
+            literals,
+        } = body;
+        // Calculate the total sum of weights
+        let total_weight = literals.iter().map(|&(_, w)| w).sum();
+
+        // Special handling when lower_bound == total_weight
+        if *lower_bound == total_weight {
+            let rule_var = rule_var;
+            self.clauses.push(
+                iter::once(rule_var as isize)
+                    .chain(literals.iter().map(|&(lit, _)| -lit))
+                    .collect(),
+            );
+            for &(lit, _) in literals {
+                self.clauses.push(vec![-(rule_var as isize), lit]);
+            }
+        } else if literals.iter().all(|&(_, w)| w >= *lower_bound) {
+            for &(lit, _) in literals {
+                self.clauses.push(vec![rule_var as isize, -lit]);
+            }
+            self.clauses.push(
+                iter::once(-(rule_var as isize))
+                    .chain(literals.iter().map(|&(lit, _)| lit))
+                    .collect(),
+            );
+        } else {
+            // Use the existing approach
+            WeightBodyBuilder::new(body, rule_var, self).generate_clauses();
         }
     }
 
