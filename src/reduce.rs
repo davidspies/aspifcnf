@@ -2,7 +2,7 @@
 pub struct Unsatisfiable;
 
 mod assert_collections {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{hash_map::Entry, HashMap, HashSet};
     use std::hash::Hash;
     use std::ops::{Deref, DerefMut};
 
@@ -24,6 +24,10 @@ mod assert_collections {
         pub fn remove(&mut self, value: &T) {
             let removed = self.0.remove(value);
             assert!(removed, "Value not found in HashSet");
+        }
+
+        pub fn try_remove(&mut self, value: &T) -> bool {
+            self.0.remove(value)
         }
     }
 
@@ -58,7 +62,7 @@ mod assert_collections {
         #[track_caller]
         pub fn remove(&mut self, key: &K) -> V {
             let removed = self.0.remove(key);
-            removed.unwrap()
+            removed.expect("Key not found in HashMap")
         }
     }
 
@@ -75,19 +79,67 @@ mod assert_collections {
             &mut self.0
         }
     }
+
+    // New AssertMultiMap
+    #[derive(Default)]
+    pub struct AssertMultiMap<K: Eq + Hash, V: Eq + Hash>(pub AssertHashMap<K, AssertHashSet<V>>);
+
+    impl<K: Eq + Hash, V: Eq + Hash> AssertMultiMap<K, V> {
+        pub fn new() -> Self {
+            AssertMultiMap(AssertHashMap::new())
+        }
+
+        #[track_caller]
+        pub fn insert(&mut self, key: K, value: V) {
+            self.0
+                .entry(key)
+                .or_insert_with(AssertHashSet::new)
+                .insert(value);
+        }
+
+        #[track_caller]
+        pub fn remove(&mut self, key: K, value: &V) {
+            match self.0.entry(key) {
+                Entry::Occupied(mut occ) => {
+                    occ.get_mut().remove(value);
+                    if occ.get().is_empty() {
+                        occ.remove();
+                    }
+                }
+                Entry::Vacant(_) => {
+                    panic!("Key not found in MultiMap");
+                }
+            }
+        }
+    }
+
+    impl<K: Eq + Hash, V: Eq + Hash> Deref for AssertMultiMap<K, V> {
+        type Target = AssertHashMap<K, AssertHashSet<V>>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl<K: Eq + Hash, V: Eq + Hash> DerefMut for AssertMultiMap<K, V> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
 }
 
 mod sat_instance {
-    use super::assert_collections::{AssertHashMap, AssertHashSet};
+    use super::assert_collections::{AssertHashMap, AssertHashSet, AssertMultiMap};
     use super::Unsatisfiable;
+    use std::collections::HashSet;
 
     #[derive(Default)]
     pub struct SatInstance {
         // Private fields
         clause_id_to_literals: AssertHashMap<usize, AssertHashSet<isize>>,
-        literal_to_clause_ids: AssertHashMap<isize, AssertHashSet<usize>>,
-        clause_length_to_clause_ids: AssertHashMap<usize, AssertHashSet<usize>>,
-        num_clauses_containing_literal_to_literals: AssertHashMap<usize, AssertHashSet<isize>>,
+        literal_to_clause_ids: AssertMultiMap<isize, usize>,
+        clause_length_to_clause_ids: AssertMultiMap<usize, usize>,
+        num_clauses_containing_literal_to_literals: AssertMultiMap<usize, isize>,
         redundant_clause_ids: AssertHashSet<usize>,
     }
 
@@ -99,19 +151,17 @@ mod sat_instance {
         }
 
         /// Returns an immutable reference to the literal to clause IDs mapping.
-        pub fn literal_to_clause_ids(&self) -> &AssertHashMap<isize, AssertHashSet<usize>> {
+        pub fn literal_to_clause_ids(&self) -> &AssertMultiMap<isize, usize> {
             &self.literal_to_clause_ids
         }
 
         /// Returns an immutable reference to the clause length to clause IDs mapping.
-        pub fn clause_length_to_clause_ids(&self) -> &AssertHashMap<usize, AssertHashSet<usize>> {
+        pub fn clause_length_to_clause_ids(&self) -> &AssertMultiMap<usize, usize> {
             &self.clause_length_to_clause_ids
         }
 
         /// Returns an immutable reference to the number of clauses containing literal to literals mapping.
-        pub fn num_clauses_containing_literal_to_literals(
-            &self,
-        ) -> &AssertHashMap<usize, AssertHashSet<isize>> {
+        pub fn num_clauses_containing_literal_to_literals(&self) -> &AssertMultiMap<usize, isize> {
             &self.num_clauses_containing_literal_to_literals
         }
 
@@ -126,7 +176,7 @@ mod sat_instance {
         pub fn add_clause(
             &mut self,
             clause_id: usize,
-            literals: std::collections::HashSet<isize>,
+            literals: HashSet<isize>,
         ) -> Result<(), Unsatisfiable> {
             if literals.is_empty() {
                 return Err(Unsatisfiable);
@@ -137,35 +187,26 @@ mod sat_instance {
 
             let clause_len = self.clause_id_to_literals[&clause_id].len();
             self.clause_length_to_clause_ids
-                .entry(clause_len)
-                .or_insert_with(AssertHashSet::new)
-                .insert(clause_id);
+                .insert(clause_len, clause_id);
 
             for &lit in self.clause_id_to_literals[&clause_id].iter() {
-                self.literal_to_clause_ids
-                    .entry(lit)
-                    .or_insert_with(AssertHashSet::new)
-                    .insert(clause_id);
+                self.literal_to_clause_ids.insert(lit, clause_id);
             }
 
             // Update num_clauses_containing_literal_to_literals
             for &lit in self.clause_id_to_literals[&clause_id].iter() {
                 let count = self.literal_to_clause_ids[&lit].len();
                 self.num_clauses_containing_literal_to_literals
-                    .entry(count)
-                    .or_insert_with(AssertHashSet::new)
-                    .insert(lit);
+                    .insert(count, lit);
                 if count > 1 {
                     self.num_clauses_containing_literal_to_literals
-                        .get_mut(&(count - 1))
-                        .unwrap()
-                        .remove(&lit);
+                        .remove(count - 1, &lit);
                 }
             }
 
             // Check for redundancy
             let literals = &self.clause_id_to_literals[&clause_id];
-            if literals.iter().any(|&l| literals.contains(&-l)) {
+            if has_redundancy(literals) {
                 self.redundant_clause_ids.insert(clause_id);
             }
 
@@ -180,34 +221,23 @@ mod sat_instance {
             let old_length = literals.len();
             literals.insert(literal);
             let new_length = literals.len();
-            if old_length != new_length {
-                self.clause_length_to_clause_ids
-                    .get_mut(&old_length)
-                    .unwrap()
-                    .remove(&clause_id);
-                self.clause_length_to_clause_ids
-                    .entry(new_length)
-                    .or_insert_with(AssertHashSet::new)
-                    .insert(clause_id);
-            }
+            assert_eq!(new_length, old_length + 1);
+
+            self.clause_length_to_clause_ids
+                .remove(old_length, &clause_id);
+            self.clause_length_to_clause_ids
+                .insert(new_length, clause_id);
 
             // Update literal_to_clause_ids
-            self.literal_to_clause_ids
-                .entry(literal)
-                .or_insert_with(AssertHashSet::new)
-                .insert(clause_id);
+            self.literal_to_clause_ids.insert(literal, clause_id);
 
             // Update num_clauses_containing_literal_to_literals
             let count = self.literal_to_clause_ids[&literal].len();
             self.num_clauses_containing_literal_to_literals
-                .entry(count)
-                .or_insert_with(AssertHashSet::new)
-                .insert(literal);
+                .insert(count, literal);
             if count > 1 {
                 self.num_clauses_containing_literal_to_literals
-                    .get_mut(&(count - 1))
-                    .unwrap()
-                    .remove(&literal);
+                    .remove(count - 1, &literal);
             }
 
             // Update redundancy
@@ -231,42 +261,32 @@ mod sat_instance {
             let new_length = literals.len();
 
             self.clause_length_to_clause_ids
-                .get_mut(&old_length)
-                .unwrap()
-                .remove(&clause_id);
+                .remove(old_length, &clause_id);
 
             self.clause_length_to_clause_ids
-                .entry(new_length)
-                .or_insert_with(AssertHashSet::new)
-                .insert(clause_id);
+                .insert(new_length, clause_id);
 
             // Update literal_to_clause_ids
-            let cids = self.literal_to_clause_ids.get_mut(&literal).unwrap();
-            let old_count = cids.len();
-            cids.remove(&clause_id);
-            let new_count = cids.len();
-            if new_count == 0 {
-                self.literal_to_clause_ids.remove(&literal);
-            }
+            self.literal_to_clause_ids.remove(literal, &clause_id);
 
             // Update num_clauses_containing_literal_to_literals
+            let new_count = self
+                .literal_to_clause_ids
+                .get(&literal)
+                .map_or(0, |s| s.len());
+            let old_count = new_count + 1;
             self.num_clauses_containing_literal_to_literals
-                .get_mut(&old_count)
-                .unwrap()
-                .remove(&literal);
-
+                .remove(old_count, &literal);
             if new_count > 0 {
                 self.num_clauses_containing_literal_to_literals
-                    .entry(new_count)
-                    .or_insert_with(AssertHashSet::new)
-                    .insert(literal);
+                    .insert(new_count, literal);
             }
 
             // Update redundancy
             if literals.contains(&-literal) {
-                self.redundant_clause_ids.insert(clause_id);
-            } else {
-                self.redundant_clause_ids.remove(&clause_id);
+                if !has_redundancy(literals) {
+                    self.redundant_clause_ids.remove(&clause_id);
+                }
             }
 
             // Check if the clause is now empty
@@ -278,42 +298,35 @@ mod sat_instance {
         }
 
         /// Eliminates a clause from the instance.
-        pub fn eliminate_clause(&mut self, clause_id: usize) {
+        pub fn remove_clause(&mut self, clause_id: usize) {
             let literals = self.clause_id_to_literals.remove(&clause_id);
 
             // Remove from clause_length_to_clause_ids
             self.clause_length_to_clause_ids
-                .get_mut(&literals.len())
-                .unwrap()
-                .remove(&clause_id);
+                .remove(literals.len(), &clause_id);
 
             // Remove from redundant_clause_ids
-            self.redundant_clause_ids.remove(&clause_id);
+            self.redundant_clause_ids.try_remove(&clause_id);
 
             for &lit in literals.iter() {
                 // Update literal_to_clause_ids
-                let cids = self.literal_to_clause_ids.get_mut(&lit).unwrap();
-                let old_count = cids.len();
-                cids.remove(&clause_id);
-                let new_count = cids.len();
-                if new_count == 0 {
-                    self.literal_to_clause_ids.remove(&lit);
-                }
+                self.literal_to_clause_ids.remove(lit, &clause_id);
 
                 // Update num_clauses_containing_literal_to_literals
+                let new_count = self.literal_to_clause_ids.get(&lit).map_or(0, |s| s.len());
+                let old_count = new_count + 1;
                 self.num_clauses_containing_literal_to_literals
-                    .get_mut(&old_count)
-                    .unwrap()
-                    .remove(&lit);
-
+                    .remove(old_count, &lit);
                 if new_count > 0 {
                     self.num_clauses_containing_literal_to_literals
-                        .entry(new_count)
-                        .or_insert_with(AssertHashSet::new)
-                        .insert(lit);
+                        .insert(new_count, lit);
                 }
             }
         }
+    }
+
+    fn has_redundancy(literals: &AssertHashSet<isize>) -> bool {
+        literals.iter().any(|&l| literals.contains(&-l))
     }
 }
 
@@ -336,43 +349,45 @@ impl SatInstance {
 
     /// Applies Rule 1: Tautology Elimination.
     pub fn apply_tautology_elimination(&mut self) -> bool {
-        let redundant_clause_ids: Vec<_> = self.redundant_clause_ids().iter().cloned().collect();
-        if !redundant_clause_ids.is_empty() {
-            for cid in redundant_clause_ids {
-                self.eliminate_clause(cid);
-            }
-            true
-        } else {
-            false
+        let redundant_clause_ids: Vec<_> = self.redundant_clause_ids().iter().copied().collect();
+        if redundant_clause_ids.is_empty() {
+            return false;
         }
+        for cid in redundant_clause_ids {
+            self.remove_clause(cid);
+        }
+        true
     }
 
     /// Applies Rule 2: Unit Propagation.
     pub fn apply_unit_propagation(&mut self) -> Result<bool, Unsatisfiable> {
         let unit_clause_ids = self.clause_length_to_clause_ids().get(&1);
-        if let Some(unit_clause_ids) = unit_clause_ids {
-            let unit_clause_ids: Vec<_> = unit_clause_ids.iter().cloned().collect();
-            for cid in unit_clause_ids {
-                let literals = &self.clause_id_to_literals()[&cid];
-                let unit_lit = *literals.iter().next().unwrap();
-                // Remove clauses containing unit_lit
-                if let Some(cids) = self.literal_to_clause_ids().get(&unit_lit) {
-                    let cids: Vec<_> = cids.iter().cloned().collect();
-                    for cid_to_remove in cids {
-                        self.eliminate_clause(cid_to_remove);
-                    }
+        let Some(unit_clause_ids) = unit_clause_ids else {
+            return Ok(false);
+        };
+        let unit_clause_ids: Vec<_> = unit_clause_ids.iter().copied().collect();
+        for cid in unit_clause_ids {
+            let Some(literals) = self.clause_id_to_literals().get(&cid) else {
+                // In case the same unit clause occurs twice
+                continue;
+            };
+            let unit_lit = *extract_singleton(literals.iter());
+            // Remove clauses containing unit_lit
+            if let Some(cids) = self.literal_to_clause_ids().get(&unit_lit) {
+                let cids: Vec<_> = cids.iter().copied().collect();
+                for cid_to_remove in cids {
+                    self.remove_clause(cid_to_remove);
                 }
-                // Remove -unit_lit from clauses
-                if let Some(cids) = self.literal_to_clause_ids().get(&-unit_lit) {
-                    let cids: Vec<_> = cids.iter().cloned().collect();
-                    for cid_to_modify in cids {
-                        self.remove_literal_from_clause(cid_to_modify, -unit_lit)?;
-                    }
+            }
+            // Remove -unit_lit from clauses
+            if let Some(cids) = self.literal_to_clause_ids().get(&-unit_lit) {
+                let cids: Vec<_> = cids.iter().copied().collect();
+                for cid_to_modify in cids {
+                    self.remove_literal_from_clause(cid_to_modify, -unit_lit)?;
                 }
-                return Ok(true);
             }
         }
-        Ok(false)
+        Ok(true)
     }
 
     /// Applies Rule 3: Pure Literal Elimination.
@@ -389,7 +404,7 @@ impl SatInstance {
                 if let Some(cids) = self.literal_to_clause_ids().get(&lit) {
                     let cids: Vec<_> = cids.iter().cloned().collect();
                     for cid in cids {
-                        self.eliminate_clause(cid);
+                        self.remove_clause(cid);
                     }
                 }
             }
@@ -417,7 +432,7 @@ impl SatInstance {
                             .unwrap();
 
                         // Remove the clause
-                        self.eliminate_clause(cid);
+                        self.remove_clause(cid);
 
                         // Replace -lit with other_lit in all clauses
                         if let Some(cids_neg) = self.literal_to_clause_ids().get(&-lit) {
@@ -457,8 +472,8 @@ impl SatInstance {
                                 .collect();
 
                             // Remove both clauses
-                            self.eliminate_clause(cid1);
-                            self.eliminate_clause(cid2);
+                            self.remove_clause(cid1);
+                            self.remove_clause(cid2);
 
                             // Add the resolvent clause
                             self.add_clause(cid1, resolvent)?;
@@ -498,6 +513,13 @@ impl SatInstance {
         }
         Ok(())
     }
+}
+
+fn extract_singleton<T>(collection: impl IntoIterator<Item = T>) -> T {
+    let mut iter = collection.into_iter();
+    let singleton = iter.next().unwrap();
+    assert!(iter.next().is_none(), "Expected a singleton collection");
+    singleton
 }
 
 // Usage Example
