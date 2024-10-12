@@ -78,10 +78,6 @@ impl VarCounter {
         self.0 += 1;
         var
     }
-
-    fn current(&self) -> usize {
-        self.0 - 1
-    }
 }
 
 /// Represents the entire ASP program.
@@ -321,11 +317,6 @@ impl SatTranslator {
             self.clauses.push(clause);
         }
     }
-
-    /// Retrieves the total number of variables used.
-    fn total_variables(&self) -> usize {
-        self.var_counter.current()
-    }
 }
 
 /// Struct to handle weight body clause generation.
@@ -483,12 +474,32 @@ fn main() {
     let var_counter = VarCounter::new(max_atom_var + 1);
     let mut translator = SatTranslator::new(var_counter);
     translator.generate_clauses(&program);
-    let total_vars = translator.total_variables();
+    let clauses = reduce::apply_reductions(translator.clauses).unwrap();
+    let mut introduced_vars: Vec<_> = clauses
+        .iter()
+        .flatten()
+        .filter_map(|&lit| {
+            let atom = lit.abs() as usize;
+            (atom > max_atom_var).then_some(atom)
+        })
+        .collect();
+    introduced_vars.sort_unstable();
+    introduced_vars.dedup();
+    let total_vars = max_atom_var + introduced_vars.len();
+    let mapping: HashMap<_, _> = introduced_vars
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| (v, max_atom_var + 1 + i))
+        .collect();
 
     // Output DIMACS CNF format
-    println!("p cnf {} {}", total_vars, translator.clauses.len());
-    for clause in translator.clauses {
-        for lit in clause {
+    println!("p cnf {} {}", total_vars, clauses.len());
+    for clause in clauses {
+        for mut lit in clause {
+            if lit.abs() > max_atom_var as isize {
+                let var = mapping[&(lit.abs() as usize)];
+                lit = var as isize * lit.signum();
+            }
             print!("{} ", lit);
         }
         println!("0");
