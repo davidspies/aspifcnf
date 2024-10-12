@@ -3,6 +3,8 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::{env, iter};
 
+mod reduce;
+
 /// Represents a rule in the ASP program.
 #[derive(Debug)]
 struct Rule {
