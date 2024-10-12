@@ -397,11 +397,16 @@ impl<'a> WeightBodyBuilder<'a> {
 
     fn generate_body_literal_clauses(&mut self, lit: Literal) {
         let bits = &self.bitstrings[&lit];
+        // Clause: r_i \/ not l'
+        self.clause_builder.clauses.push(vec![
+            self.rule_var as isize,
+            -(self.l_prime_vars[&lit] as isize),
+        ]);
         // For each bit position i
         for (i, &bit) in bits.iter().enumerate() {
             let v_i = self.v_vars[i];
-            // Clause: a \/ not l \/ v_i
-            let mut clause = vec![self.rule_var as isize, -lit];
+            // Clause: not l \/ l' \/ v_i
+            let mut clause = vec![-lit, self.l_prime_vars[&lit] as isize];
             if bit {
                 clause.push(v_i as isize);
             } else {
