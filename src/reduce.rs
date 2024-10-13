@@ -98,6 +98,26 @@ impl SatInstance {
         changed
     }
 
+    pub fn apply_equalities(&mut self) -> bool {
+        let mut changed = false;
+        for &(atom1, lit2) in self.equalities().clone().iter().rev() {
+            let lit1 = Literal(atom1 as isize);
+            for &clause_id in self.literal_to_clause_ids()[&lit1].clone().iter() {
+                self.add_literal_to_clause(clause_id, lit2);
+                self.remove_literal_from_clause(clause_id, lit1).unwrap();
+                changed = true;
+            }
+            let lit1 = Literal(-(atom1 as isize));
+            let lit2 = -lit2;
+            for &clause_id in self.literal_to_clause_ids()[&lit1].clone().iter() {
+                self.add_literal_to_clause(clause_id, lit2);
+                self.remove_literal_from_clause(clause_id, lit1).unwrap();
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Applies Rule 4: Chain Length Reduction.
     pub fn apply_chain_length_reduction(&mut self) -> bool {
         let Some(literals_with_one_clause) =
@@ -188,6 +208,11 @@ impl SatInstance {
 
             if self.apply_pure_literal_elimination() {
                 eprintln!("Pure Literal Elimination");
+                continue;
+            }
+
+            if self.apply_equalities() {
+                eprintln!("Equality Reduction");
                 continue;
             }
 

@@ -5,7 +5,11 @@ use std::ops::Neg;
 use super::assert_collections::{AssertMap, AssertMultiMap, AssertSet};
 use super::Unsatisfiable;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+use self::binary_clauses::BinaryClauses;
+
+mod binary_clauses;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Literal(pub(super) isize);
 
 impl Neg for Literal {
@@ -36,6 +40,7 @@ pub(super) struct SatInstance {
     clause_length_to_clause_ids: AssertMultiMap<usize, usize>,
     num_clauses_containing_literal_to_literals: AssertMultiMap<usize, Literal>,
     redundant_clause_ids: AssertSet<usize>,
+    binary_clauses: BinaryClauses,
 }
 
 impl SatInstance {
@@ -92,6 +97,10 @@ impl SatInstance {
         &self.redundant_clause_ids
     }
 
+    pub(super) fn equalities(&self) -> &AssertSet<(usize, Literal)> {
+        self.binary_clauses.equalities()
+    }
+
     // Primitive methods
 
     /// Adds a clause to the instance.
@@ -105,6 +114,7 @@ impl SatInstance {
         }
 
         let literals_set = AssertSet(literals);
+        self.binary_clauses.try_insert(clause_id, &literals_set);
         self.clause_id_to_literals.insert(clause_id, literals_set);
 
         let clause_len = self.clause_id_to_literals[&clause_id].len();
@@ -140,10 +150,12 @@ impl SatInstance {
     /// Adds a literal to a clause.
     pub(super) fn add_literal_to_clause(&mut self, clause_id: usize, literal: Literal) -> bool {
         let literals = self.clause_id_to_literals.get_mut(&clause_id).unwrap();
+        self.binary_clauses.try_remove(clause_id, literals);
 
         // Update clause_length_to_clause_ids
         let old_length = literals.len();
         let inserted = literals.try_insert(literal);
+        self.binary_clauses.try_insert(clause_id, literals);
         if !inserted {
             return false;
         }
@@ -186,8 +198,10 @@ impl SatInstance {
         literal: Literal,
     ) -> Result<(), Unsatisfiable> {
         let literals = self.clause_id_to_literals.get_mut(&clause_id).unwrap();
+        self.binary_clauses.try_remove(clause_id, literals);
 
         literals.remove(&literal);
+        self.binary_clauses.try_insert(clause_id, literals);
 
         // Update clause_length_to_clause_ids
         let old_length = literals.len() + 1;

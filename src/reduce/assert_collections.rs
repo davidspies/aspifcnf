@@ -1,12 +1,14 @@
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
+use std::fmt::Debug;
 use std::ops::{Deref, DerefMut};
 
 use derive_where::derive_where;
 
-#[derive(Clone, Default)]
-pub struct AssertSet<T: Ord>(pub BTreeSet<T>);
+#[derive(Clone)]
+#[derive_where(Default)]
+pub struct AssertSet<T>(pub BTreeSet<T>);
 
-impl<T: Ord> AssertSet<T> {
+impl<T: Debug + Ord> AssertSet<T> {
     pub fn new() -> Self {
         AssertSet(BTreeSet::new())
     }
@@ -20,7 +22,7 @@ impl<T: Ord> AssertSet<T> {
     #[track_caller]
     pub fn remove(&mut self, value: &T) {
         let removed = self.0.remove(value);
-        assert!(removed, "Value not found in BTreeSet");
+        assert!(removed, "Value {value:?} not found in BTreeSet");
     }
 
     pub fn try_insert(&mut self, value: T) -> bool {
@@ -49,17 +51,23 @@ impl<T: Ord> DerefMut for AssertSet<T> {
 #[derive_where(Default)]
 pub struct AssertMap<K: Ord, V>(pub BTreeMap<K, V>);
 
-impl<K: Ord, V> AssertMap<K, V> {
+impl<K: Debug + Ord, V> AssertMap<K, V> {
     #[track_caller]
     pub fn insert(&mut self, key: K, value: V) {
-        let replaced = self.0.insert(key, value);
-        assert!(replaced.is_none(), "Key already present in BTreeMap");
+        match self.0.entry(key) {
+            Entry::Vacant(vac) => {
+                vac.insert(value);
+            }
+            Entry::Occupied(occ) => {
+                panic!("Key {:?} already present in BTreeMap", occ.key());
+            }
+        }
     }
 
     #[track_caller]
     pub fn remove(&mut self, key: &K) -> V {
         let removed = self.0.remove(key);
-        removed.expect("Key not found in BTreeMap")
+        removed.unwrap_or_else(|| panic!("Key {key:?} not found in BTreeMap"))
     }
 }
 
@@ -81,7 +89,7 @@ impl<K: Ord, V> DerefMut for AssertMap<K, V> {
 #[derive_where(Default)]
 pub struct AssertMultiMap<K: Ord, V: Ord>(pub AssertMap<K, AssertSet<V>>);
 
-impl<K: Ord, V: Ord> AssertMultiMap<K, V> {
+impl<K: Debug + Ord, V: Debug + Ord> AssertMultiMap<K, V> {
     #[track_caller]
     pub fn insert(&mut self, key: K, value: V) {
         self.0
@@ -99,8 +107,8 @@ impl<K: Ord, V: Ord> AssertMultiMap<K, V> {
                     occ.remove();
                 }
             }
-            Entry::Vacant(_) => {
-                panic!("Key not found in MultiMap");
+            Entry::Vacant(vac) => {
+                panic!("Key {:?} not found in MultiMap", vac.key());
             }
         }
     }
